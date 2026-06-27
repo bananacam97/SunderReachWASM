@@ -1,5 +1,5 @@
 :{$PORT:80} {
-	root * /srv
+	root * /app
 	file_server
 
 	header {
