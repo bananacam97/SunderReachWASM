@@ -1,4 +1,4 @@
-:80 {
+:{$PORT:80} {
 	root * /srv
 	file_server
 
@@ -6,7 +6,13 @@
 		Content-Security-Policy "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: *"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy "strict-origin-when-cross-origin"
 	}
 
-	encode gzip
+	encode gzip zstd
+
+	handle_errors {
+		respond "{http.error.status_code} {http.error.status_text}"
+	}
 }
