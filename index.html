@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>SunderReach</title>
+    <link rel="icon" type="image/png" href="favicon.png">
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%; height: 100%;
+            overflow: hidden;
+            position: fixed;
+            overscroll-behavior: none;
+            background-color: #000000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #canvas-container {
+            display: flex; justify-content: center; align-items: center;
+            width: 100%; height: 100%;
+            position: relative;
+        }
+        /* SDL_WINDOW_FILL_DOCUMENT owns the buffer size.
+           CSS just says "fill the container" — SDL handles the rest. */
+        #canvas {
+            display: block;
+            width: 100%; height: 100%;
+            border: none; outline: none;
+            cursor: default;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            touch-action: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* Loading overlay */
+        #loading-overlay {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            background: #000000;
+            z-index: 100;
+            transition: opacity 0.5s ease;
+        }
+        #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        #loading-title {
+            color: #ffffff; font-size: 24px; margin-bottom: 20px;
+            font-weight: 300; letter-spacing: 2px;
+        }
+        #loading-bar-container {
+            width: 300px; height: 4px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 2px; overflow: hidden;
+        }
+        #loading-bar {
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, #4fc3f7, #29b6f6);
+            border-radius: 2px;
+            transition: width 0.3s ease;
+        }
+        #loading-status {
+            color: rgba(255,255,255,0.5); font-size: 12px;
+            margin-top: 12px;
+        }
+
+        /* Controls */
+        #controls {
+            position: absolute; top: 10px; right: 10px;
+            display: flex; gap: 8px; z-index: 50;
+            opacity: 0; transition: opacity 0.3s;
+        }
+        #canvas-container:hover #controls { opacity: 1; }
+        .ctrl-btn {
+            width: 36px; height: 36px;
+            background: rgba(0,0,0,0.6); border: none;
+            border-radius: 6px; color: #fff;
+            cursor: pointer; font-size: 16px;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.2s;
+        }
+        .ctrl-btn:hover { background: rgba(0,0,0,0.8); }
+
+        
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <!-- No width/height attributes — SDL_WINDOW_FILL_DOCUMENT sets the buffer -->
+        <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+        <div id="loading-overlay">
+            <div id="loading-title">SunderReach</div>
+            <div id="loading-bar-container">
+                <div id="loading-bar"></div>
+            </div>
+            <div id="loading-status">Initializing...</div>
+        </div>
+
+        <div id="controls">
+            <button class="ctrl-btn" id="btn-fullscreen" title="Fullscreen">&#x26F6;</button>
+            <button class="ctrl-btn" id="btn-mute" title="Mute">&#x1F50A;</button>
+        </div>
+    </div>
+
+    <script src="cge_runtime.js"></script>
+
+    <script>
+    // === CGE Web Runtime Loader ===
+    var moduleInstance = null;
+    var isMuted = false;
+
+    // Fullscreen button
+    document.getElementById('btn-fullscreen').addEventListener('click', function() {
+        var container = document.getElementById('canvas-container');
+        if (!document.fullscreenElement) {
+            container.requestFullscreen().catch(function(err) {
+                console.warn('Fullscreen failed:', err);
+            });
+        } else {
+            document.exitFullscreen();
+        }
+    });
+
+    // Mute button
+    document.getElementById('btn-mute').addEventListener('click', function() {
+        isMuted = !isMuted;
+        this.innerHTML = isMuted ? '&#x1F507;' : '&#x1F50A;';
+        if (moduleInstance) {
+            moduleInstance.ccall('cge_web_set_mute', null, ['number'], [isMuted ? 1 : 0]);
+        }
+    });
+
+    // === Canvas sizing ===
+    // Handled by SDL (SDL_WINDOW_FILL_DOCUMENT + SDL_WINDOW_HIGH_PIXEL_DENSITY).
+    // SDL3's emscripten backend tracks document size and sizes canvas backing
+    // buffer × DPR on every layout change — including DevTools toggle, fullscreen,
+    // and orientation changes. No JS resize code needed.
+
+    // === Asset Preloader ===
+    // Fetches game files over HTTP and writes them into Emscripten's MEMFS
+    // so the C++ runtime can read them with normal file I/O (BundleProvider)
+    function preloadAssets(Module) {
+        var manifest = [
+            {"url":"bundles/audio.cgeb","path":"bundles/audio.cgeb"},
+            {"url":"bundles/data.cgeb","path":"bundles/data.cgeb"},
+            {"url":"bundles/fonts.cgeb","path":"bundles/fonts.cgeb"},
+            {"url":"bundles/graphics.cgeb","path":"bundles/graphics.cgeb"},
+            {"url":"bundles/levels.cgeb","path":"bundles/levels.cgeb"},
+            {"url":"bundles/ui.cgeb","path":"bundles/ui.cgeb"},
+            {"url":"version.json","path":"version.json"}
+        ];
+        if (!manifest || manifest.length === 0) {
+            return Promise.resolve();
+        }
+
+        var statusEl = document.getElementById('loading-status');
+        var barEl = document.getElementById('loading-bar');
+        var loaded = 0;
+
+        return Promise.all(manifest.map(function(entry) {
+            return fetch(entry.url).then(function(resp) {
+                if (!resp.ok) throw new Error('Failed to fetch ' + entry.url + ': ' + resp.status);
+                return resp.arrayBuffer();
+            }).then(function(buffer) {
+                // Create parent directories in MEMFS
+                var parts = entry.path.split('/');
+                var dir = '';
+                for (var i = 0; i < parts.length - 1; i++) {
+                    dir += (dir ? '/' : '') + parts[i];
+                    try { Module.FS.mkdir(dir); } catch(e) { /* exists */ }
+                }
+                // Write file to MEMFS
+                Module.FS.writeFile(entry.path, new Uint8Array(buffer));
+                loaded++;
+                if (statusEl) statusEl.textContent = 'Loading assets... (' + loaded + '/' + manifest.length + ')';
+                if (barEl) barEl.style.width = ((loaded / manifest.length) * 70) + '%';
+            });
+        }));
+    }
+
+    // === Boot Sequence ===
+    // 1. Create Module with preRun hook (pauses main() until assets are in MEMFS)
+    // 2. preRun fetches all assets and writes them to virtual FS
+    // 3. main() runs -> InitializeResources() finds bundles/ -> BundleProvider
+    var statusEl = document.getElementById('loading-status');
+    if (statusEl) statusEl.textContent = 'Loading runtime...';
+
+    CGERuntime({
+        canvas: document.getElementById('canvas'),
+        preRun: [function(Module) {
+            // Mount IDBFS for user config persistence
+            try {
+                Module.FS.mkdir('/userdata');
+                Module.FS.mount(Module.IDBFS, {}, '/userdata');
+            } catch(e) { /* may already exist */ }
+
+            // Preload assets -- addRunDependency pauses main() until we're done
+            Module.addRunDependency('asset-preload');
+            preloadAssets(Module).then(function() {
+                // Sync IDBFS from IndexedDB -> MEMFS
+                Module.FS.syncfs(true, function(err) {
+                    if (err) console.warn('IDBFS sync error:', err);
+                    else console.log('CGE: User data loaded from IndexedDB');
+                    Module.removeRunDependency('asset-preload');
+                });
+            }).catch(function(err) {
+                console.error('CGE: Asset preload failed:', err);
+                Module.removeRunDependency('asset-preload');
+            });
+        }],
+        onRuntimeInitialized: function() {
+            console.log('CGE: Runtime initialized');
+            var overlay = document.getElementById('loading-overlay');
+            overlay.classList.add('hidden');
+            setTimeout(function() { overlay.style.display = 'none'; }, 500);
+            document.getElementById('canvas').focus();
+        },
+        setStatus: function(text) {
+            var status = document.getElementById('loading-status');
+            if (status && text) status.textContent = text;
+        },
+        printErr: function(text) {
+            console.error('CGE:', text);
+        }
+    }).then(function(Module) {
+        moduleInstance = Module;
+    });
+
+    
+    </script>
+    
+</body>
+</html>
